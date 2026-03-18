@@ -1,0 +1,133 @@
+CTF Challenge Writeup: "Dig Deeper" — PDF Polyglot Reverse Engineering
+
+## Challenge Description
+We are given a `challenge.pdf` whose only visible content is the text **"dig deeper"** — a hint that the flag is not on the surface.
+
+**Flag:** `ST4F1T{Schr0dinger_s0lved_me}`
+
+---
+
+## Step 1: Reconnaissance with `strings`
+
+```bash
+strings challenge.pdf
+```
+
+The output revealed a **polyglot file** — simultaneously a valid PDF and a hidden ELF binary. Key indicators:
+- Valid PDF 1.7 structure with LibreOffice metadata
+- ELF artifacts: `/lib64/ld-linux-x86-64.so.2`, `libc.so.6`, C runtime functions
+- Suspicious string: `[*] Initialising... please wait.`
+
+---
+
+## Step 2: Locating the Hidden ELF
+
+```bash
+grep -a -b "%%EOF" challenge.pdf
+# 13041:%%EOF
+```
+
+```python
+data = open('challenge.pdf','rb').read()
+idx = data.find(b'%%EOF')
+rest = data[idx+5:]
+print('First bytes:', rest[:16].hex())
+# 0a7f454c46... → newline + ELF magic at offset 13047
+```
+
+---
+
+## Step 3: Extracting and Running the ELF
+
+```bash
+dd if=challenge.pdf of=challenge.elf bs=1 skip=13047
+file challenge.elf
+# ELF 64-bit LSB pie executable, x86-64, dynamically linked, stripped
+chmod +x challenge.elf
+./challenge.elf
+# [*] Initialising... please wait.  ← hangs
+```
+
+```bash
+ltrace ./challenge.elf
+# sleep(43200)  ← 12 hours!
+```
+
+---
+
+## Step 4: Bypassing the Sleep with GDB
+
+```bash
+gdb ./challenge.elf
+(gdb) break sleep
+(gdb) run
+# Breakpoint hit
+(gdb) return (int)0
+(gdb) continue
+# tinyurl.com/4azx8mse
+```
+
+---
+
+## Step 5: Decoding the URL Content — Gzip + Base64
+
+The URL returned a PowerShell script with a gzip+base64 blob:
+
+```bash
+echo "H4sIAB1ArGkC/..." | base64 -d | gunzip
+```
+
+Output: another PowerShell script with a **reversed base64** string.
+
+---
+
+## Step 6: Reversing and Decoding
+
+```python
+data = '=ogI90zZDB3a...'
+reversed_data = data[::-1]
+import base64
+decoded = base64.b64decode(reversed_data)
+print(decoded)
+```
+
+Output: another base64 layer containing a PowerShell XOR decryption routine:
+
+```powershell
+$key = 0x5A
+$hex = "7d090e6e1c6b0e21093932286a3e33343d3f2805296a362c3f3e05373f277d"
+```
+
+---
+
+## Step 7: XOR Decryption — The Flag
+
+```python
+key = 0x5A
+hex_data = "7d090e6e1c6b0e21093932286a3e33343d3f2805296a362c3f3e05373f277d"
+bytes_data = bytes.fromhex(hex_data)
+result = ''.join(chr(b ^ key) for b in bytes_data)
+print(result)
+# ST4F1T{Schr0dinger_s0lved_me}
+```
+
+---
+
+## Layer Summary
+
+| Layer | Technique |
+|-------|-----------|
+| 1 | PDF polyglot hiding an ELF binary |
+| 2 | ELF with 12-hour `sleep()` anti-analysis |
+| 3 | URL pointing to external resource |
+| 4 | Gzip + Base64 encoded PowerShell |
+| 5 | Reversed Base64 string |
+| 6 | Double Base64 encoding |
+| 7 | XOR encryption with key `0x5A` |
+
+## Flag
+```
+ST4F1T{Schr0dinger_s0lved_me}
+```
+
+The flag references **Schrödinger's cat** — a perfect metaphor for a file that exists as both a PDF and an ELF binary simultaneously.
