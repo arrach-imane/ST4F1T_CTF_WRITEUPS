@@ -1,133 +1,218 @@
-CTF Challenge Writeup: "Dig Deeper" — PDF Polyglot Reverse Engineering
+# CTF Writeup — Dig Deeper
 
-## Challenge Description
-We are given a `challenge.pdf` whose only visible content is the text **"dig deeper"** — a hint that the flag is not on the surface.
-
+**Category:** Reverse Engineering
 **Flag:** `ST4F1T{Schr0dinger_s0lved_me}`
 
 ---
 
-## Step 1: Reconnaissance with `strings`
+## Challenge Description
+
+We are given a file called `challenge.pdf`. Its only visible content is the phrase:
+
+> *dig deeper*
+
+This is a hint that the solution is not on the surface.
+
+---
+
+## TL;DR
+
+The PDF is a **polyglot file** — it simultaneously contains a valid PDF and a hidden ELF binary appended after the `%%EOF` marker. The binary sleeps for 12 hours as an anti-analysis trick, which we bypass with GDB. After that, it outputs a URL containing a multi-layered encoded payload that ultimately decodes to the flag via XOR.
+
+---
+
+## Layer Overview
+
+| # | Technique | Description |
+|---|-----------|-------------|
+| 1 | PDF Polyglot | A valid ELF binary is appended after the PDF's `%%EOF` marker |
+| 2 | Sleep Anti-Analysis | The ELF calls `sleep(43200)` — a deliberate 12-hour delay |
+| 3 | URL Redirect | After bypassing sleep, the binary prints a TinyURL |
+| 4 | Gzip + Base64 | The URL serves a gzip-compressed, base64-encoded PowerShell script |
+| 5 | Reversed Base64 | The script contains a base64 string that must be reversed first |
+| 6 | Double Base64 | Reversing and decoding reveals another base64 layer with XOR logic |
+| 7 | XOR Encryption | A hex string XORed with key `0x5A` reveals the flag |
+
+---
+
+## Step-by-Step Solution
+
+### Step 1 — Initial Reconnaissance
 
 ```bash
 strings challenge.pdf
 ```
 
-The output revealed a **polyglot file** — simultaneously a valid PDF and a hidden ELF binary. Key indicators:
-- Valid PDF 1.7 structure with LibreOffice metadata
-- ELF artifacts: `/lib64/ld-linux-x86-64.so.2`, `libc.so.6`, C runtime functions
-- Suspicious string: `[*] Initialising... please wait.`
+The output reveals two distinct sets of content inside the same file:
+
+- Valid **PDF 1.7** structure — xref table, trailer, LibreOffice producer metadata
+- **ELF binary** artifacts — `/lib64/ld-linux-x86-64.so.2`, `libc.so.6`, C runtime symbols (`puts`, `sleep`, `malloc`, `free`), GCC build info, ELF section names (`.text`, `.data`, `.bss`, `.plt`)
+- A suspicious runtime string: `[*] Initialising... please wait.`
+
+> **Conclusion:** This is a polyglot file. The ELF binary is hidden inside the PDF, appended after its `%%EOF` terminator.
 
 ---
 
-## Step 2: Locating the Hidden ELF
+### Step 2 — Locating the Hidden ELF
+
+PDF files terminate with `%%EOF`. Any data after this marker is ignored by PDF readers but is fully accessible to other tools. We searched for this boundary:
 
 ```bash
-grep -a -b "%%EOF" challenge.pdf
-# 13041:%%EOF
+$ grep -a -b '%%EOF' challenge.pdf
+13041:%%EOF
 ```
 
+Then we inspected the raw bytes immediately after `%%EOF`:
+
 ```python
-data = open('challenge.pdf','rb').read()
-idx = data.find(b'%%EOF')
-rest = data[idx+5:]
+data = open('challenge.pdf', 'rb').read()
+idx  = data.find(b'%%EOF')
+rest = data[idx + 5:]
 print('First bytes:', rest[:16].hex())
-# 0a7f454c46... → newline + ELF magic at offset 13047
+
+# Output:
+# 0a 7f 45 4c 46 ...
+# 0x0a = newline, 0x7f454c46 = ELF magic bytes
+```
+
+The ELF magic bytes `7f 45 4c 46` appear at offset **13047** — one byte past `%%EOF` due to a trailing newline.
+
+---
+
+### Step 3 — Extracting the ELF Binary
+
+```bash
+$ dd if=challenge.pdf of=challenge.elf bs=1 skip=13047
+14600+0 records in
+14600+0 records out
+
+$ file challenge.elf
+challenge.elf: ELF 64-bit LSB pie executable, x86-64, dynamically linked, stripped
 ```
 
 ---
 
-## Step 3: Extracting and Running the ELF
+### Step 4 — Running the Binary and Discovering the Sleep
 
 ```bash
-dd if=challenge.pdf of=challenge.elf bs=1 skip=13047
-file challenge.elf
-# ELF 64-bit LSB pie executable, x86-64, dynamically linked, stripped
-chmod +x challenge.elf
-./challenge.elf
-# [*] Initialising... please wait.  ← hangs
+$ chmod +x challenge.elf && ./challenge.elf
+[*] Initialising... please wait.
+# hangs indefinitely
+
+$ ltrace ./challenge.elf
+puts("[*] Initialising... please wait.")
+fflush(0x...)
+sleep(43200)    # 43,200 seconds = 12 HOURS
 ```
 
-```bash
-ltrace ./challenge.elf
-# sleep(43200)  ← 12 hours!
-```
+> **Anti-Analysis Trick:** The binary deliberately sleeps for 43,200 seconds to deter dynamic analysis. We must bypass this to get any output.
 
 ---
 
-## Step 4: Bypassing the Sleep with GDB
+### Step 5 — Bypassing Sleep with GDB
+
+We used GDB to intercept the `sleep()` call and force it to return immediately:
 
 ```bash
-gdb ./challenge.elf
+$ gdb ./challenge.elf
 (gdb) break sleep
+Breakpoint 1 at 0x7ffff7cf9470
+
 (gdb) run
-# Breakpoint hit
-(gdb) return (int)0
+[*] Initialising... please wait.
+Breakpoint 1 hit
+
+(gdb) return (int)0    # skip the sleep entirely
 (gdb) continue
-# tinyurl.com/4azx8mse
+
+tinyurl.com/4azx8mse   # the binary outputs a URL!
 ```
 
 ---
 
-## Step 5: Decoding the URL Content — Gzip + Base64
+### Step 6 — Decoding the URL Payload (Gzip + Base64)
 
-The URL returned a PowerShell script with a gzip+base64 blob:
+Visiting the URL returned a PowerShell script containing a large encoded blob:
+
+```powershell
+$b = "H4sIAB1ArGkC/01STW/iMBC9..."    # base64-encoded gzip
+```
+
+Decoded with:
 
 ```bash
-echo "H4sIAB1ArGkC/..." | base64 -d | gunzip
+echo "<base64_string>" | base64 -d | gunzip
 ```
 
-Output: another PowerShell script with a **reversed base64** string.
+The output was another PowerShell script containing a **reversed** base64 string:
+
+```powershell
+$data = "=ogI90zZDB3a..."
+$out  = -join ($data[-1..-($data.Length)])    # reversal
+```
 
 ---
 
-## Step 6: Reversing and Decoding
+### Step 7 — Reversing and Decoding (Double Base64)
+
+We replicated the reversal and decoded it in Python:
 
 ```python
-data = '=ogI90zZDB3a...'
-reversed_data = data[::-1]
 import base64
-decoded = base64.b64decode(reversed_data)
+
+data         = '=ogI90zZDB3a...'
+reversed_b64 = data[::-1]
+decoded      = base64.b64decode(reversed_b64).decode()
 print(decoded)
 ```
 
-Output: another base64 layer containing a PowerShell XOR decryption routine:
+This revealed the final encoding layer — a PowerShell XOR decryption routine:
 
 ```powershell
-$key = 0x5A
-$hex = "7d090e6e1c6b0e21093932286a3e33343d3f2805296a362c3f3e05373f277d"
+$key    = 0x5A
+$hex    = "7d090e6e1c6b0e21093932286a3e33343d3f2805296a362c3f3e05373f277d"
+$bytes  = [byte[]]($hex -split '(?<=\G.{2})' | Where-Object { $_ } | ForEach-Object { [Convert]::ToByte($_, 16) })
+$result = [string]::join("", ($bytes | ForEach-Object { [char]($_ -bxor $key) }))
 ```
 
 ---
 
-## Step 7: XOR Decryption — The Flag
+### Step 8 — XOR Decryption and Flag Retrieval
+
+We replicated the XOR decryption in Python:
 
 ```python
-key = 0x5A
+key      = 0x5A
 hex_data = "7d090e6e1c6b0e21093932286a3e33343d3f2805296a362c3f3e05373f277d"
-bytes_data = bytes.fromhex(hex_data)
-result = ''.join(chr(b ^ key) for b in bytes_data)
+result   = ''.join(chr(b ^ key) for b in bytes.fromhex(hex_data))
 print(result)
-# ST4F1T{Schr0dinger_s0lved_me}
 ```
 
----
+Output:
 
-## Layer Summary
-
-| Layer | Technique |
-|-------|-----------|
-| 1 | PDF polyglot hiding an ELF binary |
-| 2 | ELF with 12-hour `sleep()` anti-analysis |
-| 3 | URL pointing to external resource |
-| 4 | Gzip + Base64 encoded PowerShell |
-| 5 | Reversed Base64 string |
-| 6 | Double Base64 encoding |
-| 7 | XOR encryption with key `0x5A` |
-
-## Flag
 ```
 ST4F1T{Schr0dinger_s0lved_me}
 ```
 
-The flag references **Schrödinger's cat** — a perfect metaphor for a file that exists as both a PDF and an ELF binary simultaneously.
+---
+
+## Flag
+
+```
+ST4F1T{Schr0dinger_s0lved_me}
+```
+
+> **Thematic Note:** The flag references Schrödinger's cat — a perfect metaphor. Just as the cat is simultaneously alive and dead, this file simultaneously exists as both a valid PDF and a valid ELF binary until you look inside.
+
+---
+
+## Tools Used
+
+| Tool | Purpose |
+|------|---------|
+| `strings` | Initial content discovery |
+| `file` / `grep` | File type identification and offset search |
+| `dd` | Binary extraction by byte offset |
+| `ltrace` | Dynamic library call tracing (revealed `sleep(43200)`) |
+| `GDB` | Runtime debugging to bypass the sleep |
+| `Python 3` | Base64 decoding, gzip decompression, XOR decryption |
