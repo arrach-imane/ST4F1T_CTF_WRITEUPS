@@ -1,151 +1,176 @@
-Reverse Engineering — sabon_lblldi Write-up
+# 🧠 sabon_lblldi — Reverse Engineering Write-up
 
-Event: ST4F1T
-Category: Reverse Engineering
+> **Event:** ST4F1T &nbsp;|&nbsp; **Category:** Reverse Engineering &nbsp;|&nbsp; **Flag:** `ST4F1T{first_stripped_bin4ry}`
 
-📌 Challenge Description
+---
 
-We are given a binary named sabon_lblldi.exe.
-Running it prompts for a password, and our objective is to recover the correct input that reveals the flag.
+## 📌 Challenge Overview
 
-At first glance, nothing obvious is exposed, so we proceed with standard reverse engineering methodology.
+We're handed a binary called `sabon_lblldi.exe`. It runs, prompts for a password, and our job is to figure out what that password is — and grab the flag.
 
-🔍 Step 1 — Initial Binary Inspection
+No source code. No hints. Just the binary.
 
-Before opening any disassembler, I checked the binary format:
+---
 
+## 🔧 Tools Used
+
+| Tool | Purpose |
+|------|---------|
+| `file` | Identify binary format and detect packing |
+| `upx` | Unpack the UPX-compressed executable |
+| Ghidra | Static reverse engineering and control flow analysis |
+| Python | XOR decode the obfuscated password |
+
+---
+
+## 🔍 Step 1 — Initial Inspection
+
+Before touching a disassembler, always start with `file`:
+
+```bash
 file sabon_lblldi.exe
+```
 
-The output shows:
+Output:
 
+```
 PE32 executable (console) Intel 80386, for MS Windows, UPX compressed
+```
 
-This immediately tells us two things:
+Two immediate observations:
 
-It’s a 32-bit Windows executable
+- 32-bit Windows PE binary
+- **UPX packed** — the real code is hidden
 
-It is packed using UPX
+Analyzing a packed binary in this state is misleading. The disassembler sees the unpacker stub, not the actual logic. We unpack first.
 
-Packed binaries hide their real code, so analyzing it in this state would be misleading.
+---
 
-👉 The correct next step is to unpack it.
+## 📦 Step 2 — Unpacking with UPX
 
-📦 Step 2 — Unpacking the Binary
-
-I used UPX to restore the original executable:
-
+```bash
 upx -d sabon_lblldi.exe -o sabon_lblldi_unpacked.exe
+```
 
-Now the binary is ready for proper static analysis.
+Now the binary is restored to its original form and ready for proper static analysis.
 
-🔬 Step 3 — Static Analysis with Ghidra
+---
 
-After loading the unpacked binary into Ghidra and analyzing it, I located the main logic responsible for user interaction:
+## 🔬 Step 3 — Static Analysis in Ghidra
 
+Loading the unpacked binary into Ghidra and running auto-analysis, we locate the main entry point:
+
+```
 FUN_00401a59
-What this function does:
+```
 
-Displays the prompt "password:"
+This function:
+- Prints the prompt `"password:"`
+- Reads user input via `fgets`
+- Passes it to a validation routine: `FUN_004019f7(input)`
 
-Reads user input using fgets
+The challenge lives inside that validation routine.
 
-Passes the input to a validation function:
+---
 
-FUN_004019f7(input)
+## 🔐 Step 4 — The Validation Logic
 
-So the core of the challenge is inside this validation routine.
+The comparison happens in `FUN_00401965`. Simplified:
 
-🔐 Step 4 — Understanding the Validation Logic
-
-The function responsible for checking the password is:
-
-FUN_00401965
-Simplified logic:
+```c
 len1 = strlen(input);
 len2 = strlen(expected);
 
 result = len1 ^ len2;
 
-for each byte:
+for each byte i:
     result |= input[i] ^ expected[i];
 
 return (result == 0);
-Analysis:
+```
 
-It compares both length and content
+Key observations:
 
-Uses XOR to accumulate differences
+- Compares both **length and content**
+- Uses XOR to accumulate all differences into a single value
+- **No early exit** — intentionally mimics constant-time comparison to resist timing side-channels (or just to look scarier)
 
-Avoids early exit (similar to constant-time comparison)
+The input is compared against a hidden string. Our goal: find and reconstruct that string.
 
-👉 This confirms that the program compares the input with a hidden string stored somewhere else.
+---
 
-So the real goal becomes:
+## 🧩 Step 5 — Tracing the Hidden Password
 
-🔎 Find and reconstruct the hidden expected string
+Following the call chain from the validation function:
 
-🧩 Step 5 — Locating the Hidden Password
+```
+FUN_004019f7  →  FUN_00401937  →  FUN_004017fb  →  FUN_0040178e
+```
 
-Tracing back where the expected string comes from:
+### 5.1 — The Encoded Byte Array
 
-FUN_004019f7 → FUN_00401937 → FUN_004017fb → FUN_0040178e
-Step 5.1 — Encoded Data Initialization
+Inside `FUN_004017fb`, a hardcoded byte array is initialized:
 
-Inside:
-
-FUN_004017fb
-
-We find a hardcoded byte array:
-
+```c
 0x61, 0x66, 0x06, 0x74, 0x03, 0x66, 0x49, 0x54, ...
+```
 
-This is clearly not readable ASCII → encoded data.
+Not readable ASCII — this is encoded data.
 
-Step 5.2 — Transformation Function
+### 5.2 — The Decoding Routine
 
-The buffer is then processed by:
+The array is passed to:
 
+```c
 FUN_0040178e(buffer, size, 0x32)
+```
 
-Which internally calls:
+Which calls `FUN_00401737(buffer, size, key)`. Core operation:
 
-FUN_00401737(buffer, size, key)
-
-Core operation:
-
+```c
 buffer[i] ^= 0x32;
+```
 
-👉 This is a simple XOR decryption with key 0x32
+Simple XOR cipher with key `0x32`.
 
-🧮 Step 6 — Decoding the Password
+---
 
-Now that we understand the encoding, we can reconstruct the hidden string.
+## 🧮 Step 6 — Decoding the Password
 
-Python script:
+Armed with the byte array and the key, decoding is trivial:
+
+```python
 data = [
-0x61,0x66,0x06,0x74,0x03,0x66,0x49,0x54,0x5b,0x40,
-0x41,0x46,0x6d,0x41,0x46,0x40,0x5b,0x42,0x42,0x57,
-0x56,0x6d,0x50,0x5b,0x5c,0x06,0x40,0x4b,0x4f
+    0x61, 0x66, 0x06, 0x74, 0x03, 0x66, 0x49, 0x54, 0x5b, 0x40,
+    0x41, 0x46, 0x6d, 0x41, 0x46, 0x40, 0x5b, 0x42, 0x42, 0x57,
+    0x56, 0x6d, 0x50, 0x5b, 0x5c, 0x06, 0x40, 0x4b, 0x4f
 ]
 
 print(''.join(chr(x ^ 0x32) for x in data))
+```
+
 Output:
+
+```
 ST4F1T{first_stripped_bin4ry}
-🧠 Step 7 — Final Behavior
+```
 
-When the correct password is provided:
+---
 
-The comparison function returns success
+## 🏁 Step 7 — Full Execution
 
-The program calls a success routine
+Feeding this as the password:
 
-The flag is printed
+1. `FUN_00401965` receives the input
+2. XOR comparison across all bytes returns `0`
+3. Validation returns success
+4. The program calls its success routine and prints the flag
 
-Other functions present in the binary (recursive chains with multiple constants) act as noise/obfuscation and do not influence the validation logic.
+> The binary contains additional recursive functions with various constants. These are noise — obfuscation to pad the call graph. They play no role in the validation path.
 
-🧰 Tools Used
-Tool	Purpose
-file	Identify binary format and packing
-upx	Unpack the executable
-Ghidra	Static reverse engineering
-Python	Decode XOR-obfuscated data
+
+## 🚩 Flag
+
+```
+ST4F1T{first_stripped_bin4ry}
+```
